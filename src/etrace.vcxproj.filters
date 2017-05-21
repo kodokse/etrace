@@ -27,12 +27,21 @@
     <ClInclude Include="etrace.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="log_context.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="win_util.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="stdafx.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="etrace.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="log_context.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

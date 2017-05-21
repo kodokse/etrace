@@ -34,5 +34,6 @@ namespace fs = std::tr2::sys;
 #include <ampp/etl/pdb_provider.h>
 #include <ampp/etl/time_util.h>
 #include <ampp/etl/trace_enumerator.h>
+#include <ampp/etl/guid_util.h>
 
 // TODO: reference additional headers your program requires here
