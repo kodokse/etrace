@@ -48,9 +48,9 @@ struct WindowContext
   HWND listView;
   DWORD itemCounter;
   int selectedColumn;
-  etl_lib::FormatDatabase fmtDb;
-  std::unique_ptr<etl_lib::LogfileEnumerator> logFile;
-  std::unique_ptr<etl_lib::PdbProvider> pdbProvider;
+  etl::FormatDatabase fmtDb;
+  std::unique_ptr<etl::TraceEnumerator> logTrace;
+  etl::PdbFileManager pdbManager;
   std::vector<ColumnContext> columns;
   COLORREF customColors[16];
 };
@@ -61,13 +61,14 @@ using CommandLineMap = std::map<std::wstring, std::vector<std::wstring>>;
 
 bool ParseCommandLine(LPWSTR cmdLine, CommandLineMap &result)
 {
-  //static const wchar_t *keys[] = {L"pdb", L"log"};
-  CommandLineMap::value_type *current_key = nullptr;
+  CommandLineMap::iterator current_key = result.end();
   size_t current_key_index = 0;
   CmdLineState state = CmdLineState::Initial;
   auto len = wcslen(cmdLine);
   std::wstring current_value;
-  for(size_t i = 0; i < len; ++i)
+  size_t i = 0;
+  size_t backtrack = 0;
+  while(i < len)
   {
     if(state == CmdLineState::Initial)
     {
@@ -80,7 +81,7 @@ bool ParseCommandLine(LPWSTR cmdLine, CommandLineMap &result)
         state = CmdLineState::InString;
         break;
       case L' ':
-        if(current_key && !current_value.empty())
+        if(current_key != result.end() && !current_value.empty())
         {
           current_key->second.push_back(std::move(current_value));
         }
@@ -92,12 +93,13 @@ bool ParseCommandLine(LPWSTR cmdLine, CommandLineMap &result)
     }
     else if(state == CmdLineState::Select)
     {
-      for(auto &&k : result)
+      for(auto k = result.begin(); k != result.end(); ++k)
       {
-        if(cmdLine[i] == k.first[0])
+        if(cmdLine[i] == k->first[0])
         {
-          current_key = &k;
+          current_key = k;
           current_key_index = 1;
+          backtrack = i;
           state = CmdLineState::Matching;
           break;
         }
@@ -111,15 +113,21 @@ bool ParseCommandLine(LPWSTR cmdLine, CommandLineMap &result)
       }
       else if(cmdLine[i] != current_key->first[current_key_index++])
       {
-        // invalid key
-        return false;
+        ++current_key;
+        if(current_key == result.end())
+        {
+          // invalid key
+          return false;
+        }
+        i = backtrack;
+        current_key_index = 1;
       }
     }
     else if(state == CmdLineState::InString)
     {
       if(cmdLine[i] == L'\"')
       {
-        if(current_key)
+        if(current_key != result.end())
         {
           current_key->second.push_back(std::move(current_value));
         }
@@ -130,8 +138,9 @@ bool ParseCommandLine(LPWSTR cmdLine, CommandLineMap &result)
         current_value += cmdLine[i];
       }
     }
+    ++i;
   }
-  if(current_key && !current_value.empty())
+  if(current_key != result.end() && !current_value.empty())
   {
     current_key->second.push_back(std::move(current_value));
   }
@@ -163,17 +172,21 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
   CommandLineMap cmdLineMap;
   cmdLineMap[L"pdb"];
+  auto &sessionNameVec = cmdLineMap[L"live"];
   auto &logVec = cmdLineMap[L"log"];
   ParseCommandLine(lpCmdLine, cmdLineMap);
 
-  context.pdbProvider = std::make_unique<etl_lib::PdbProvider>();
-  if(!logVec.empty())
+  for(auto &&pdbs : cmdLineMap[L"pdb"])
   {
-    context.logFile = std::make_unique<etl_lib::LogfileEnumerator>(context.fmtDb, logVec.front());
-    for(auto &&pdbs : cmdLineMap[L"pdb"])
-    {
-      context.fmtDb.AddProvider(context.pdbProvider->Provide(pdbs));
-    }
+    context.fmtDb.AddProvider(etl::PdbProvider(context.pdbManager, pdbs));
+  }
+  if(!sessionNameVec.empty())
+  {
+    context.logTrace = std::make_unique<etl::LiveTraceEnumerator>(context.fmtDb, sessionNameVec.front());
+  }
+  else if(!logVec.empty())
+  {
+    context.logTrace = std::make_unique<etl::LogfileEnumerator>(context.fmtDb, logVec.front());
   }
 
   // Perform application initialization:
@@ -345,36 +358,36 @@ void RepositionControls(WindowContext *context)
   }
 }
 
-etl_lib::TraceEventDataItem ColumnToDataItem(int column)
+etl::TraceEventDataItem ColumnToDataItem(int column)
 {
-  static const etl_lib::TraceEventDataItem columns[] = {
-    etl_lib::TraceEventDataItem::TraceIndex,
-    etl_lib::TraceEventDataItem::ModuleName,
-    etl_lib::TraceEventDataItem::ProcessId,
-    etl_lib::TraceEventDataItem::ThreadId,
-    etl_lib::TraceEventDataItem::SourceFile,
-    etl_lib::TraceEventDataItem::Function,
-    etl_lib::TraceEventDataItem::TimeStamp,
-    etl_lib::TraceEventDataItem::Message,
+  static const etl::TraceEventDataItem columns[] = {
+    etl::TraceEventDataItem::TraceIndex,
+    etl::TraceEventDataItem::ModuleName,
+    etl::TraceEventDataItem::ProcessId,
+    etl::TraceEventDataItem::ThreadId,
+    etl::TraceEventDataItem::SourceFile,
+    etl::TraceEventDataItem::Function,
+    etl::TraceEventDataItem::TimeStamp,
+    etl::TraceEventDataItem::Message,
   };
   if(column >= 0 && column < _countof(columns))
   {
     return columns[column];
   }
-  return etl_lib::TraceEventDataItem::MAX_ITEM;
+  return etl::TraceEventDataItem::MAX_ITEM;
 }
 
-int DataItemToColumn(etl_lib::TraceEventDataItem item)
+int DataItemToColumn(etl::TraceEventDataItem item)
 {
-  static const std::map<etl_lib::TraceEventDataItem, int> columns = {
-    {etl_lib::TraceEventDataItem::TraceIndex, 0},
-    {etl_lib::TraceEventDataItem::ModuleName, 1},
-    {etl_lib::TraceEventDataItem::ProcessId, 2},
-    {etl_lib::TraceEventDataItem::ThreadId, 3},
-    {etl_lib::TraceEventDataItem::SourceFile, 4},
-    {etl_lib::TraceEventDataItem::Function, 5},
-    {etl_lib::TraceEventDataItem::TimeStamp, 6},
-    {etl_lib::TraceEventDataItem::Message, 7},
+  static const std::map<etl::TraceEventDataItem, int> columns = {
+    {etl::TraceEventDataItem::TraceIndex, 0},
+    {etl::TraceEventDataItem::ModuleName, 1},
+    {etl::TraceEventDataItem::ProcessId, 2},
+    {etl::TraceEventDataItem::ThreadId, 3},
+    {etl::TraceEventDataItem::SourceFile, 4},
+    {etl::TraceEventDataItem::Function, 5},
+    {etl::TraceEventDataItem::TimeStamp, 6},
+    {etl::TraceEventDataItem::Message, 7},
   };
   auto it = columns.find(item);
   if(it != columns.end())
@@ -411,7 +424,7 @@ bool ValidRegEx(const std::wstring &txt)
   return bsCount != 1;
 }
 
-bool FilterColumn(WindowContext *context, etl_lib::TraceEventDataItem item, const std::wstring &txt)
+bool FilterColumn(WindowContext *context, etl::TraceEventDataItem item, const std::wstring &txt)
 {
   bool rv = true;
   wchar_t retxt[100];
@@ -478,7 +491,7 @@ void ResetView(WindowContext *context)
   }
   if(invalidate)
   {
-    context->logFile->ApplyFilters();
+    context->logTrace->ApplyFilters();
   }
 }
 
@@ -506,7 +519,7 @@ bool LoadPdbFromDialog(WindowContext *context)
         std::wstring name = &fileBuf[offset];
         if(!name.empty())
         {
-          context->fmtDb.AddProvider(context->pdbProvider->Provide(dir / name));
+          context->fmtDb.AddProvider(etl::PdbProvider(context->pdbManager, dir / name));
           offset += name.length() + 1;
         }
         else
@@ -517,9 +530,9 @@ bool LoadPdbFromDialog(WindowContext *context)
     }
     else
     {
-      context->fmtDb.AddProvider(context->pdbProvider->Provide(fileBuf));
+      context->fmtDb.AddProvider(etl::PdbProvider(context->pdbManager, fileBuf));
     }
-    ListView_SetItemCountEx(context->listView, context->logFile->GetItemCount(), LVSICF_NOSCROLL);
+    ListView_SetItemCountEx(context->listView, context->logTrace->GetItemCount(), LVSICF_NOSCROLL);
     return true;
   }
   return false;
@@ -560,23 +573,23 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     context->mainWindow = hWnd;
     InitTraceList(context);
     //
-    for(etl_lib::TraceEventDataItem colItem = etl_lib::TraceEventDataItem::TraceIndex; colItem < etl_lib::TraceEventDataItem::MAX_ITEM; ++colItem)
+    for(etl::TraceEventDataItem colItem = etl::TraceEventDataItem::TraceIndex; colItem < etl::TraceEventDataItem::MAX_ITEM; ++colItem)
     {
-      context->logFile->AddFilter([context, colItem](etl_lib::TraceEventDataItem item, const std::wstring &txt)
+      context->logTrace->AddFilter([context, colItem](etl::TraceEventDataItem item, const std::wstring &txt)
       {
         return item == colItem ? FilterColumn(context, item, txt) : true;
       });
     }
-    context->logFile->SetCountCallback([context](size_t itemCount)
+    context->logTrace->SetCountCallback([context](size_t itemCount)
     {
       if(itemCount > 0)
       {
         for(int i = 0; i < _countof(columnNames); ++i)
         {
           auto item = ColumnToDataItem(i);
-          if(item != etl_lib::TraceEventDataItem::MAX_ITEM)
+          if(item != etl::TraceEventDataItem::MAX_ITEM)
           {
-            auto &&s = context->logFile->GetItemValue(itemCount - 1, item);
+            auto &&s = context->logTrace->GetItemValue(itemCount - 1, item);
             auto &procCol = context->columns[i].columnColor[s];
             if(procCol.count++ == 0)
             {
@@ -588,7 +601,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
       }
       ListView_SetItemCountEx(context->listView, itemCount, LVSICF_NOSCROLL);
     });
-    context->logFile->Start();
+    context->logTrace->Start();
     //
   }
   break;
@@ -630,14 +643,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
       context->selectedColumn = listView->iSubItem;
       if(redraw)
       {
-        ListView_SetItemCountEx(context->listView, context->logFile->GetItemCount(), LVSICF_NOSCROLL);
+        ListView_SetItemCountEx(context->listView, context->logTrace->GetItemCount(), LVSICF_NOSCROLL);
       }
     }
     break;
     case LVN_GETDISPINFO:
     {
       NMLVDISPINFOW *plvdi = reinterpret_cast<NMLVDISPINFOW *>(lParam);
-      plvdi->item.pszText = const_cast<LPWSTR>(context->logFile->GetItemValue(plvdi->item.iItem, ColumnToDataItem(plvdi->item.iSubItem), nullptr));
+      plvdi->item.pszText = const_cast<LPWSTR>(context->logTrace->GetItemValue(plvdi->item.iItem, ColumnToDataItem(plvdi->item.iSubItem), nullptr));
       return TRUE;
     }
     break;
@@ -648,7 +661,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
       {
         if(context->selectedColumn >= 0)
         {
-          auto &&s = context->logFile->GetItemValue(lvd->nmcd.dwItemSpec, ColumnToDataItem(context->selectedColumn));
+          auto &&s = context->logTrace->GetItemValue(lvd->nmcd.dwItemSpec, ColumnToDataItem(context->selectedColumn));
           if(!s.empty())
           {
             auto &ci = context->columns[context->selectedColumn].columnColor[s];
@@ -672,7 +685,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     int selIdx = ListView_GetSelectionMark(context->listView);
     if(selIdx >= 0)
     {
-      auto &&s = context->logFile->GetItemValue(selIdx, ColumnToDataItem(context->selectedColumn));
+      auto &&s = context->logTrace->GetItemValue(selIdx, ColumnToDataItem(context->selectedColumn));
       if(!s.empty())
       {
         auto &ci = context->columns[context->selectedColumn].columnColor[s];
@@ -691,7 +704,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
           {
             ci.txtColor = RGB(0xFF, 0xFF, 0xFF);
           }
-          ListView_SetItemCountEx(context->listView, context->logFile->GetItemCount(), LVSICF_NOSCROLL);
+          ListView_SetItemCountEx(context->listView, context->logTrace->GetItemCount(), LVSICF_NOSCROLL);
         }
       }
     }
@@ -711,7 +724,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
       {
       case CBN_EDITCHANGE:
       case CBN_SELCHANGE:
-        context->logFile->ApplyFilters();
+        context->logTrace->ApplyFilters();
         break;
       }
     }
