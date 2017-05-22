@@ -8,11 +8,19 @@ struct ColorInfo
   COLORREF txtColor;
 };
 
-struct ColumnContext
+class ColumnContext
 {
+public:
+  ColumnContext(HWND fWnd = nullptr, float r = 0.0f);
+  void SetFilterText(const wchar_t *txt, int len);
+  std::wstring GetFilterText() const;
+public:
   HWND filterWindow;
   float sizeRatio;
   std::map<std::wstring, ColorInfo> columnColor;
+private:
+  std::wstring filterText_;
+  mutable std::mutex filterTextLock_;
 };
 
 class LogContext
@@ -37,9 +45,10 @@ public:
   void SetItemText(NMLVDISPINFOW *plvdi);
   void SetItemColors(NMLVCUSTOMDRAW *lvd);
   void HandleContextMenu();
-  void InvalidateView();
+  void InvalidateView(DWORD flags);
   int ColumnCount() const;
   bool IsFilterMessage(int controlId) const;
+  void UpdateFilterText(int controlId);
 private:
   bool FileOpenDialog(LPCWSTR filter, const std::function<void(const fs::path &)> &fileHandler, DWORD flags = 0);
 private:
@@ -51,7 +60,8 @@ private:
   etl::FormatDatabase fmtDb_;
   std::unique_ptr<etl::TraceEnumerator> logTrace_;
   etl::PdbFileManager pdbManager_;
-  std::vector<ColumnContext> columns_;
+  std::vector<std::unique_ptr<ColumnContext>> columns_;
   COLORREF customColors_[16];
+  std::wstring windowTitle_;
 };
 

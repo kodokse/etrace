@@ -32,15 +32,21 @@ bool ParseCommandLine(LPWSTR cmdLine, CommandLineMap &result)
       switch(cmdLine[i])
       {
       case L'-':
+        if (current_key != result.end())
+        {
+            current_key->second.push_back(std::move(current_value));
+            current_key = result.end();
+        }
         state = CmdLineState::Select;
         break;
       case L'\"':
         state = CmdLineState::InString;
         break;
       case L' ':
-        if(current_key != result.end() && !current_value.empty())
+        if(current_key != result.end())
         {
           current_key->second.push_back(std::move(current_value));
+          current_key = result.end();
         }
         break;
       default:
@@ -87,6 +93,7 @@ bool ParseCommandLine(LPWSTR cmdLine, CommandLineMap &result)
         if(current_key != result.end())
         {
           current_key->second.push_back(std::move(current_value));
+          current_key = result.end();
         }
         state = CmdLineState::Initial;
       }
@@ -97,7 +104,7 @@ bool ParseCommandLine(LPWSTR cmdLine, CommandLineMap &result)
     }
     ++i;
   }
-  if(current_key != result.end() && !current_value.empty())
+  if(current_key != result.end())
   {
     current_key->second.push_back(std::move(current_value));
   }
@@ -139,7 +146,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
   }
   if(!sessionNameVec.empty())
   {
-    context.InitializeLiveSession(sessionNameVec.front());
+    context.InitializeLiveSession(sessionNameVec.front().empty() ? etl::NewGuidAsString() : sessionNameVec.front());
   }
   else if(!logVec.empty())
   {
@@ -336,6 +343,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
       {
       case CBN_EDITCHANGE:
       case CBN_SELCHANGE:
+        context->UpdateFilterText(wmId);
         context->ApplyFilters();
         break;
       }
@@ -349,6 +357,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         DialogBox(g_hInstance, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, About);
         break;
       case IDM_EXIT:
+        context->EndTrace();
         DestroyWindow(hWnd);
         break;
       case ID_FILE_OPEN:
@@ -365,7 +374,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
           context->BeginTrace();
         }
         break;
-      break;
+      case ID_FILE_LOADPDBS:
+        context->LoadPdbFromDialog();
+        break;
       default:
         return DefWindowProc(hWnd, message, wParam, lParam);
       }
@@ -387,6 +398,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
   break;
   case WM_SIZE:
     reinterpret_cast<LogContext *>(GetWindowLongPtr(hWnd, GWLP_USERDATA))->RepositionControls();
+    break;
+  case WM_CLOSE:
+    reinterpret_cast<LogContext *>(GetWindowLongPtr(hWnd, GWLP_USERDATA))->EndTrace();
+    DestroyWindow(hWnd);
     break;
   case WM_DESTROY:
     PostQuitMessage(0);
