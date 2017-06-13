@@ -6,6 +6,8 @@
 #define IDC_FIRSTFILTER 202
 #define FILTER_HEIGHT 25
 
+LRESULT CALLBACK SubClassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
 namespace
 {
 
@@ -58,6 +60,7 @@ bool ValidRegEx(const std::wstring &txt)
   }
   wchar_t last = 0;
   int bsCount = 0;
+  int brackets = 0;
   for(auto ch : txt)
   {
     if(last == L'\\' && ch >= L'0' && ch <= L'9')
@@ -71,10 +74,21 @@ bool ValidRegEx(const std::wstring &txt)
     else
     {
       bsCount = 0;
+      if (last != L'\\')
+      {
+        if (ch == L'[')
+        {
+          ++brackets;
+        }
+        if (ch == L']')
+        {
+          --brackets;
+        }
+      }
     }
     last = ch;
   }
-  return bsCount != 1;
+  return (bsCount & 1) != 1 && brackets == 0;
 }
 
 bool UseWhiteText(COLORREF c)
@@ -102,16 +116,23 @@ COLORREF GenerateColor(int current, int unique_element_count)
 
 ////////////////////////
 
-ColumnContext::ColumnContext(HWND fWnd, float ratio)
+ColumnContext::ColumnContext(HWND fWnd, float ratio, LogContext *owner)
   : filterWindow(fWnd)
   , sizeRatio(ratio)
+  , longestTextLength_(0)
+  , owner_(owner)
+  , orgProc_(nullptr)
 {
 }
 
-void ColumnContext::SetFilterText(const wchar_t *txt, int len)
+bool ColumnContext::SetFilterText(const wchar_t *txt, int len)
 {
+  std::wstring newFilt(txt, len);
+  bool rv = false;
   std::lock_guard<std::mutex> l(filterTextLock_);
-  filterText_.assign(txt, len);
+  rv = filterText_ != newFilt;
+  filterText_.swap(newFilt);
+  return rv;
 }
 
 std::wstring ColumnContext::GetFilterText() const
@@ -132,11 +153,62 @@ LogContext::LogContext(HINSTANCE programInstance)
 {
 }
 
+bool LogContext::ColorFilterLine(size_t line)
+{
+  for (auto &&flt : colorFilters_)
+  {
+    for (int c = 0; c < _countof(columnNames); ++c)
+    {
+      auto item = ColumnToDataItem(c);
+      if (item != etl::TraceEventDataItem::MAX_ITEM)
+      {
+        auto &&text = logTrace_->GetItemValue(line, item);
+        if (flt.first(c, text))
+        {
+          auto md = logTrace_->GetItemMetadata(line);
+          if (!md)
+          {
+            filterRowColors_.push_back(std::make_unique<std::pair<COLORREF, COLORREF>>(flt.second.bgColor, flt.second.txtColor));
+            logTrace_->SetItemMetadata(line, filterRowColors_.back().get());
+          }
+          else
+          {
+            auto col = reinterpret_cast<std::pair<COLORREF, COLORREF> *>(md);
+            col->first = flt.second.bgColor;
+            col->second = flt.second.txtColor;
+          }
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+bool LogContext::ResetViewNoInvalidate()
+{
+  bool invalidate = selectedColumn_ >= 0;
+  selectedColumn_ = -1;
+  for (auto &c : columns_)
+  {
+    SetWindowTextW(c->filterWindow, L"");
+    if (c->SetFilterText(L"", 0))
+    {
+      invalidate = true;
+    }
+  }
+  return invalidate;
+}
+
 void LogContext::ApplyFilters()
 {
   if(logTrace_)
   {
     logTrace_->ApplyFilters();
+    for (auto i = 0; i < logTrace_->GetItemCount(); ++i)
+    {
+      ColorFilterLine(i);
+    }
   }
 }
 
@@ -188,7 +260,18 @@ bool LogContext::InitTraceList()
                             x, r.top, colWidth, FILTER_HEIGHT, mainWindow_, reinterpret_cast<HMENU>(IDC_FIRSTFILTER + i), programInstance_, nullptr);
     x += colWidth;
     //
-    columns_.push_back(std::make_unique<ColumnContext>(cbWnd, ratio));
+    columns_.push_back(std::make_unique<ColumnContext>(cbWnd, ratio, this));
+    POINT pt = { 0, 0 };
+    HWND hwndEdit;
+    // find first window within the combo box that isn't the combo box itself
+    do
+    {
+      ++pt.x;
+      ++pt.y;
+      hwndEdit = ChildWindowFromPoint(cbWnd, pt);
+    } while (hwndEdit == cbWnd);
+    SetPropW(hwndEdit, L"this", columns_.back().get());
+    columns_.back()->orgProc_ = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(hwndEdit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&ColumnContext::SubClassProc)));
     //
     LVCOLUMN col;
     ZeroMemory(&col, sizeof(col));
@@ -206,9 +289,14 @@ void LogContext::RecalculateRatios(NMHEADER *hdr)
   RECT r;
   GetWindowRect(listView_, &r);
   const int w = Width(r);
+  const int minW = w / 25;
+  int maxW = w;
   for(size_t i = 0; i < columns_.size(); ++i)
   {
     auto colW = i == hdr->iItem && hdr->pitem ? hdr->pitem->cxy : ListView_GetColumnWidth(listView_, i);
+    colW = __max(colW, minW);
+    colW = __min(colW, maxW);
+    maxW -= colW;
     columns_[i]->sizeRatio = static_cast<float>(colW) / w;
   }
 }
@@ -238,7 +326,6 @@ void LogContext::RepositionControls()
 bool LogContext::FilterColumn(etl::TraceEventDataItem item, const std::wstring &txt)
 {
   bool rv = true;
-  wchar_t retxt[100];
   int column = DataItemToColumn(item);
   if(column < 0)
   {
@@ -255,18 +342,9 @@ bool LogContext::FilterColumn(etl::TraceEventDataItem item, const std::wstring &
 
 void LogContext::ResetView()
 {
-  bool invalidate = selectedColumn_ >= 0;
-  selectedColumn_ = -1;
-  for(auto &c : columns_)
+  if(ResetViewNoInvalidate())
   {
-    if(GetWindowTextLengthW(c->filterWindow) > 0)
-    {
-      invalidate = true;
-    }
-    SetWindowTextW(c->filterWindow, L"");
-  }
-  if(invalidate)
-  {
+    needRedraw_ = true;
     ApplyFilters();
   }
 }
@@ -362,24 +440,46 @@ bool LogContext::BeginTrace()
   }
   logTrace_->SetCountCallback([this](size_t itemCount)
   {
-    if(itemCount > 0)
+    if (itemCount > 0)
     {
-      for(int i = 0; i < _countof(columnNames); ++i)
+      size_t totalMaxLength = 0;
+      for (int i = 0; i < _countof(columnNames); ++i)
       {
         auto item = ColumnToDataItem(i);
-        if(item != etl::TraceEventDataItem::MAX_ITEM)
+        if (item != etl::TraceEventDataItem::MAX_ITEM)
         {
           auto &&s = logTrace_->GetItemValue(itemCount - 1, item);
           auto &procCol = columns_[i]->columnColor[s];
-          if(procCol.count++ == 0)
+          columns_[i]->longestTextLength_ = __max(columns_[i]->longestTextLength_, s.length());
+          totalMaxLength += columns_[i]->longestTextLength_;
+          if (procCol.count++ == 0)
           {
             procCol.index = columns_[i]->columnColor.size();
             procCol.bgColor = 0;
           }
         }
       }
+      if (totalMaxLength > 0)
+      {
+        auto maxL = totalMaxLength;
+        for (int i = 0; i < _countof(columnNames); ++i)
+        {
+          auto l = __max(10, columns_[i]->longestTextLength_);
+          l = __min(l, maxL);
+          maxL -= l;
+          columns_[i]->sizeRatio = static_cast<float>(l) / totalMaxLength;
+        }
+        RepositionControls();
+      }
+      ColorFilterLine(itemCount - 1);
     }
-    ListView_SetItemCountEx(listView_, itemCount, LVSICF_NOINVALIDATEALL);
+    DWORD flags = LVSICF_NOINVALIDATEALL;
+    if (needRedraw_)
+    {
+      flags = 0;
+      needRedraw_ = false;
+    }
+    ListView_SetItemCountEx(listView_, itemCount, LVSICF_NOSCROLL | flags);
   });
   SetWindowTextW(mainWindow_, windowTitle_.c_str());
   return logTrace_->Start();
@@ -429,32 +529,48 @@ void LogContext::SetItemText(NMLVDISPINFOW *plvdi)
   plvdi->item.pszText = const_cast<LPWSTR>(logTrace_->GetItemValue(plvdi->item.iItem, ColumnToDataItem(plvdi->item.iSubItem), nullptr));
 }
 
-void LogContext::SetItemColors(NMLVCUSTOMDRAW * lvd)
+bool LogContext::SetItemColorFromColumn(NMLVCUSTOMDRAW *lvd)
 {
-  if(selectedColumn_ < 0)
+  if (selectedColumn_ < 0)
   {
-    return;
-  }
-  if(!logTrace_)
-  {
-    return;
+    return false;
   }
   auto &&s = logTrace_->GetItemValue(lvd->nmcd.dwItemSpec, ColumnToDataItem(selectedColumn_));
-  if(s.empty())
+  if (s.empty())
   {
-    return;
+    return false;
   }
   auto &ci = columns_[selectedColumn_]->columnColor[s];
   if (ci.bgColor == 0)
   {
-      ci.bgColor = GenerateColor(ci.index, columns_[selectedColumn_]->columnColor.size());
-      if (UseWhiteText(ci.bgColor))
-      {
-          ci.txtColor = RGB(0xFF, 0xFF, 0xFF);
-      }
+    ci.bgColor = GenerateColor(ci.index, columns_[selectedColumn_]->columnColor.size());
+    if (UseWhiteText(ci.bgColor))
+    {
+      ci.txtColor = RGB(0xFF, 0xFF, 0xFF);
+    }
   }
   lvd->clrTextBk = ci.bgColor;
   lvd->clrText = ci.txtColor;
+  return true;
+}
+
+void LogContext::SetItemColors(NMLVCUSTOMDRAW *lvd)
+{
+  if(!logTrace_)
+  {
+    return;
+  }
+  if (SetItemColorFromColumn(lvd))
+  {
+    return;
+  }
+  auto colPair = reinterpret_cast<std::pair<COLORREF, COLORREF> *>(logTrace_->GetItemMetadata(lvd->nmcd.dwItemSpec));
+  if (!colPair)
+  {
+    return;
+  }
+  lvd->clrTextBk = colPair->first;
+  lvd->clrText = colPair->second;
 }
 
 void LogContext::HandleContextMenu()
@@ -522,5 +638,61 @@ void LogContext::UpdateFilterText(int controlId)
   wchar_t retxt[100];
   const int column = controlId - IDC_FIRSTFILTER;
   const int l = ComboBox_GetText(columns_[column]->filterWindow, retxt, _countof(retxt));
-  columns_[column]->SetFilterText(retxt, l);
+  if (columns_[column]->SetFilterText(retxt, l))
+  {
+    needRedraw_ = true;
+  }
+}
+
+void LogContext::ClearTrace()
+{
+  logTrace_->RemoveAllItems();
+  for (auto &c : columns_)
+  {
+    c->columnColor.clear();
+  }
+  ResetViewNoInvalidate();
+  InvalidateView(0);
+}
+
+///////
+
+LRESULT CALLBACK ColumnContext::SubClassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+  auto self = reinterpret_cast<ColumnContext *>(GetPropW(hwnd, L"this"));
+  if (!self)
+  {
+    return 0;
+  }
+  switch (msg)
+  {
+  case WM_KEYDOWN:
+    switch (wParam)
+    {
+    case VK_TAB:
+      //SendMessage(hwndMain, WM_TAB, 0, 0);
+      return 0;
+    case VK_ESCAPE:
+      self->owner_->ResetView();
+      //SendMessage(hwndMain, WM_ESC, 0, 0);
+      return 0;
+    case VK_RETURN:
+      //SendMessage(hwndMain, WM_ENTER, 0, 0);
+      return 0;
+    }
+    break;
+
+  case WM_KEYUP:
+  case WM_CHAR:
+    switch (wParam)
+    {
+    case VK_TAB:
+    case VK_ESCAPE:
+    case VK_RETURN:
+      return 0;
+    }
+  }
+
+  //  Call the original window procedure for default processing. 
+  return CallWindowProcW(self->orgProc_, hwnd, msg, wParam, lParam);
 }

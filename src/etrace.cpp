@@ -256,6 +256,9 @@ void HandleKeyDown(LogContext *context, WORD virtualKey)
   case VK_F5:
     context->LoadPdbFromDialog();
     break;
+  case VK_F12:
+    context->ClearTrace();
+    break;
   }
 }
 
