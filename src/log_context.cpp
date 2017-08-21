@@ -116,6 +116,14 @@ COLORREF GenerateColor(int current, int unique_element_count)
 
 ////////////////////////
 
+RowContext::RowContext()
+  : selected(false)
+  , colorFade(1.0f)
+{
+}
+
+///////////////////////
+
 ColumnContext::ColumnContext(HWND fWnd, float ratio, LogContext *owner)
   : filterWindow(fWnd)
   , sizeRatio(ratio)
@@ -153,6 +161,19 @@ LogContext::LogContext(HINSTANCE programInstance)
 {
 }
 
+template <typename T>
+inline T lerp(T a, T b, double t)
+{
+  return static_cast<T>((1.0 - t) * a + b * t);
+}
+
+inline COLORREF ColorLerp(COLORREF c1, COLORREF c2, double t)
+{
+  return RGB(lerp(GetRValue(c1), GetRValue(c2), t),
+    lerp(GetGValue(c1), GetGValue(c2), t),
+    lerp(GetBValue(c1), GetBValue(c2), t));
+}
+
 bool LogContext::ColorFilterLine(size_t line)
 {
   for (auto &&flt : colorFilters_)
@@ -165,19 +186,20 @@ bool LogContext::ColorFilterLine(size_t line)
         auto &&text = logTrace_->GetItemValue(line, item);
         if (flt.first(c, text))
         {
-          auto md = logTrace_->GetItemMetadata(line);
-          if (!md)
+          auto rc = GetRowContext(line);
+          if (rc)
           {
-            filterRowColors_.push_back(std::make_unique<std::pair<COLORREF, COLORREF>>(flt.second.bgColor, flt.second.txtColor));
-            logTrace_->SetItemMetadata(line, filterRowColors_.back().get());
-          }
-          else
-          {
-            auto col = reinterpret_cast<std::pair<COLORREF, COLORREF> *>(md);
-            col->first = flt.second.bgColor;
-            col->second = flt.second.txtColor;
+            rc->colorFade = flt.second;
           }
           return true;
+        }
+        else
+        {
+          auto rc = GetRowContext(line);
+          if (rc)
+          {
+            rc->colorFade = 1.0f;
+          }
         }
       }
     }
@@ -200,6 +222,26 @@ bool LogContext::ResetViewNoInvalidate()
   return invalidate;
 }
 
+void LogContext::InitializeRowContext(size_t line)
+{
+  auto md = logTrace_->GetItemMetadata(line);
+  if (!md)
+  {
+    rowInfo_.push_back(std::make_unique<RowContext>());
+    logTrace_->SetItemMetadata(line, rowInfo_.back().get());
+  }
+}
+
+RowContext *LogContext::GetRowContext(size_t line)
+{
+  return reinterpret_cast<RowContext *>(logTrace_->GetItemMetadata(line));
+}
+
+const RowContext *LogContext::GetRowContext(size_t line) const
+{
+  return reinterpret_cast<const RowContext *>(logTrace_->GetItemMetadata(line));
+}
+
 void LogContext::ApplyFilters()
 {
   if(logTrace_)
@@ -220,6 +262,7 @@ bool LogContext::AddPdbProvider(const fs::path &pdbPath)
 
 bool LogContext::InitializeLiveSession(const std::wstring &sessionName)
 {
+  sessionName_ = sessionName;
   logTrace_ = std::make_unique<etl::LiveTraceEnumerator>(fmtDb_, sessionName);
   windowTitle_ = sessionName + L" - LIVE ETRACE";
   return true;
@@ -349,7 +392,7 @@ void LogContext::ResetView()
   }
 }
 
-bool LogContext::FileOpenDialog(LPCWSTR filter, const std::function<void(const fs::path &)> &fileHandler, DWORD flags)
+bool LogContext::FileOpenDialog(LPCWSTR filter, const std::function<bool(const fs::path &)> &fileHandler, DWORD flags)
 {
   std::wstring fileBuf;
   fileBuf.resize(512);
@@ -375,7 +418,10 @@ bool LogContext::FileOpenDialog(LPCWSTR filter, const std::function<void(const f
       std::wstring name = &fileBuf[offset];
       if(!name.empty())
       {
-        fileHandler(dir / name);
+        if (!fileHandler(dir / name))
+        {
+          return false;
+        }
         offset += name.length() + 1;
       }
       else
@@ -387,7 +433,53 @@ bool LogContext::FileOpenDialog(LPCWSTR filter, const std::function<void(const f
   else
   {
     fileBuf.resize(firstNul);
-    fileHandler(fileBuf);
+    return fileHandler(fileBuf);
+  }
+  return true;
+}
+
+bool LogContext::FileSaveDialog(LPCWSTR filter, const std::function<bool(const fs::path &)> &fileHandler, DWORD flags, const std::wstring &suggestedFileName)
+{
+  std::wstring fileBuf = suggestedFileName;
+  fileBuf.resize(512);
+  OPENFILENAMEW ofn;
+  ZeroMemory(&ofn, sizeof(ofn));
+  ofn.lStructSize = sizeof(ofn);
+  ofn.hwndOwner = mainWindow_;
+  ofn.Flags = flags | OFN_ENABLESIZING | OFN_EXPLORER | OFN_LONGNAMES;
+  ofn.lpstrFilter = filter;
+  ofn.lpstrFile = &fileBuf[0];
+  ofn.nMaxFile = fileBuf.size();
+  if (!GetSaveFileNameW(&ofn))
+  {
+    return false;
+  }
+  auto firstNul = fileBuf.find_first_of(L'\0');
+  if (firstNul < ofn.nFileOffset)
+  {
+    fs::path dir = &fileBuf[0];
+    auto offset = ofn.nFileOffset;
+    while (offset < fileBuf.length())
+    {
+      std::wstring name = &fileBuf[offset];
+      if (!name.empty())
+      {
+        if (!fileHandler(dir / name))
+        {
+          return false;
+        }
+        offset += name.length() + 1;
+      }
+      else
+      {
+        break;
+      }
+    }
+  }
+  else
+  {
+    fileBuf.resize(firstNul);
+    return fileHandler(fileBuf);
   }
   return true;
 }
@@ -398,7 +490,98 @@ bool LogContext::LoadPdbFromDialog()
                     [this](const fs::path &filePath)
                     {
                       fmtDb_.AddProvider(etl::PdbProvider(pdbManager_, filePath));
+                      return true;
                     }, OFN_ALLOWMULTISELECT))
+  {
+    InvalidateView(LVSICF_NOSCROLL);
+    return true;
+  }
+  return false;
+}
+
+template <class CharT>
+bool is_white(CharT c)
+{
+  return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+template <class CharT, class TraitsT>
+std::basic_string<CharT, TraitsT> &rstrip(std::basic_string<CharT, TraitsT> &s)
+{
+  auto l = s.length();
+  while (l > 0 && is_white(s[l - 1]))
+  {
+    --l;
+  }
+  if (l < s.length())
+  {
+    s.resize(l);
+  }
+  return s;
+}
+
+bool LogContext::ExportFromDialogAll()
+{
+  size_t count = 0;
+  return ExportFromDialog([this, &count](size_t *n)
+  {
+    if (count < logTrace_->GetItemCount())
+    {
+      *n = count++;
+      return true;
+    }
+    return false;
+  });
+}
+
+bool LogContext::ExportFromDialogSelected()
+{
+  int pos = -1;
+  return ExportFromDialog([this, &pos](size_t *n)
+  {
+    pos = ListView_GetNextItem(listView_, pos, LVNI_SELECTED);
+    if (pos >= 0)
+    {
+      *n = pos;
+      return true;
+    }
+    return false;
+  });
+}
+
+bool LogContext::ExportFromDialog(const std::function<bool (size_t *n)> &enumerator)
+{
+  if (FileSaveDialog(L"Text File (*.txt;*.log)\0*.txt;*.log\0\0",
+    [this, enumerator](const fs::path &filePath)
+  {
+    if (!fs::exists(filePath.parent_path()))
+    {
+      fs::create_directories(filePath.parent_path());
+    }
+    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> converter;
+    auto fh = _wfopen(filePath.c_str(), L"wb");
+    if (!fh)
+    {
+      return false;
+    }
+    size_t i = 0;
+    while(enumerator(&i))
+    {
+      std::string txt;
+      for (int c = 0; c < ColumnCount(); ++c)
+      {
+        if (!txt.empty())
+        {
+          txt += '\t';
+        }
+        txt += converter.to_bytes(logTrace_->GetItemValue(i, ColumnToDataItem(c)));
+      }
+      rstrip(txt) += "\r\n";
+      fwrite(txt.c_str(), 1, txt.length(), fh);
+    }
+    fclose(fh);
+    return true;
+  }, 0, sessionName_ + L".log"))
   {
     InvalidateView(LVSICF_NOSCROLL);
     return true;
@@ -411,7 +594,7 @@ bool LogContext::LoadEtlFromDialog()
   if(FileOpenDialog(L"Event Trace Log Files\0*.etl\0\0",
                     [this](const fs::path &filePath)
                     {
-                      LoadEventLogFile(filePath);
+                      return LoadEventLogFile(filePath);
                     }))
   {
     InvalidateView(0);
@@ -431,24 +614,25 @@ bool LogContext::BeginTrace()
   {
     return false;
   }
-  for(etl::TraceEventDataItem colItem = etl::TraceEventDataItem::TraceIndex; colItem < etl::TraceEventDataItem::MAX_ITEM; ++colItem)
+  for(int column = 0; column < ColumnCount(); ++column)
   {
-    logTrace_->AddFilter([this, colItem](etl::TraceEventDataItem item, const std::wstring &txt)
-    {
-      return item == colItem ? FilterColumn(item, txt) : true;
-    });
+    colorFilters_.push_back(std::make_pair([this, column](int col, const std::wstring &val) -> bool {
+      return col == column && !val.empty() ? !FilterColumn(ColumnToDataItem(col), val) : false;
+    }, 0.37f));
   }
   logTrace_->SetCountCallback([this](size_t itemCount)
   {
     if (itemCount > 0)
     {
+      const auto lineNo = itemCount - 1;
+      InitializeRowContext(lineNo);
       size_t totalMaxLength = 0;
       for (int i = 0; i < _countof(columnNames); ++i)
       {
         auto item = ColumnToDataItem(i);
         if (item != etl::TraceEventDataItem::MAX_ITEM)
         {
-          auto &&s = logTrace_->GetItemValue(itemCount - 1, item);
+          auto &&s = logTrace_->GetItemValue(lineNo, item);
           auto &procCol = columns_[i]->columnColor[s];
           columns_[i]->longestTextLength_ = __max(columns_[i]->longestTextLength_, s.length());
           totalMaxLength += columns_[i]->longestTextLength_;
@@ -560,17 +744,16 @@ void LogContext::SetItemColors(NMLVCUSTOMDRAW *lvd)
   {
     return;
   }
-  if (SetItemColorFromColumn(lvd))
-  {
-    return;
-  }
-  auto colPair = reinterpret_cast<std::pair<COLORREF, COLORREF> *>(logTrace_->GetItemMetadata(lvd->nmcd.dwItemSpec));
+  lvd->clrTextBk = RGB(0xFF, 0xFF, 0xFF);
+  lvd->clrText = RGB(0, 0, 0);
+  SetItemColorFromColumn(lvd);
+  auto colPair = reinterpret_cast<RowContext *>(logTrace_->GetItemMetadata(lvd->nmcd.dwItemSpec));
   if (!colPair)
   {
     return;
   }
-  lvd->clrTextBk = colPair->first;
-  lvd->clrText = colPair->second;
+  lvd->clrTextBk = ColorLerp(0x00FFFFFF, lvd->clrTextBk, colPair->colorFade);
+  lvd->clrText = ColorLerp(0x00FFFFFF, lvd->clrText, colPair->colorFade);
 }
 
 void LogContext::HandleContextMenu()
@@ -581,6 +764,10 @@ void LogContext::HandleContextMenu()
   }
   int selIdx = ListView_GetSelectionMark(listView_);
   if(selIdx < 0)
+  {
+    return;
+  }
+  if (selectedColumn_ < 0)
   {
     return;
   }

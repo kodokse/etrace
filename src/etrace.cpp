@@ -233,19 +233,6 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow, LogContext *context)
   return TRUE;
 }
 
-template <typename T>
-inline T lerp(T a, T b, double t)
-{
-  return static_cast<T>((1.0 - t) * a + b * t);
-}
-
-inline COLORREF ColorLerp(COLORREF c1, COLORREF c2, double t)
-{
-  return RGB(lerp(GetRValue(c1), GetRValue(c2), t),
-             lerp(GetGValue(c1), GetGValue(c2), t),
-             lerp(GetBValue(c1), GetBValue(c2), t));
-}
-
 void HandleKeyDown(LogContext *context, WORD virtualKey)
 {
   switch(virtualKey)
@@ -379,6 +366,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         break;
       case ID_FILE_LOADPDBS:
         context->LoadPdbFromDialog();
+        break;
+      case ID_FILE_EXPORT:
+        context->ExportFromDialogAll();
+        break;
+      case ID_FILE_EXPORTSELECTED:
+        context->ExportFromDialogSelected();
         break;
       default:
         return DefWindowProc(hWnd, message, wParam, lParam);

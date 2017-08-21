@@ -8,9 +8,16 @@ struct ColorInfo
   COLORREF txtColor;
 };
 
-using FilterList = std::list<std::pair<std::function<bool(int column, const std::wstring &value)>, ColorInfo>>;
+using ColorFadeFilterList = std::list<std::pair<std::function<bool(int column, const std::wstring &value)>, float>>;
 
 class LogContext;
+
+struct RowContext
+{
+  bool selected;
+  float colorFade;
+  RowContext();
+};
 
 class ColumnContext
 {
@@ -47,6 +54,8 @@ public:
   void ResetView();
   bool LoadPdbFromDialog();
   bool LoadEtlFromDialog();
+  bool ExportFromDialogAll();
+  bool ExportFromDialogSelected();
   void SetMainWindow(HWND hWnd);
   bool BeginTrace();
   void EndTrace();
@@ -60,10 +69,15 @@ public:
   void UpdateFilterText(int controlId);
   void ClearTrace();
 private:
-  bool FileOpenDialog(LPCWSTR filter, const std::function<void(const fs::path &)> &fileHandler, DWORD flags = 0);
+  bool ExportFromDialog(const std::function<bool(size_t *n)> &enumerator);
+  bool FileOpenDialog(LPCWSTR filter, const std::function<bool(const fs::path &)> &fileHandler, DWORD flags = 0);
+  bool FileSaveDialog(LPCWSTR filter, const std::function<bool(const fs::path &)> &fileHandler, DWORD flags = 0, const std::wstring &suggestedFileName = L"");
   bool SetItemColorFromColumn(NMLVCUSTOMDRAW *lvd);
   bool ColorFilterLine(size_t line);
   bool ResetViewNoInvalidate();
+  void InitializeRowContext(size_t line);
+  RowContext *GetRowContext(size_t line);
+  const RowContext *GetRowContext(size_t line) const;
 private:
   HINSTANCE programInstance_;
   HWND mainWindow_;
@@ -75,9 +89,10 @@ private:
   std::unique_ptr<etl::TraceEnumerator> logTrace_;
   etl::PdbFileManager pdbManager_;
   std::vector<std::unique_ptr<ColumnContext>> columns_;
-  std::vector<std::unique_ptr<std::pair<COLORREF, COLORREF>>> filterRowColors_;
-  FilterList colorFilters_;
+  std::vector<std::unique_ptr<RowContext>> rowInfo_;
+  ColorFadeFilterList colorFilters_;
   COLORREF customColors_[16];
   std::wstring windowTitle_;
+  std::wstring sessionName_;
 };
 
