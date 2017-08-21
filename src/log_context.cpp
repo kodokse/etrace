@@ -270,7 +270,14 @@ bool LogContext::InitializeLiveSession(const std::wstring &sessionName)
 
 bool LogContext::LoadEventLogFile(const fs::path &etlPath)
 {
-  logTrace_ = std::make_unique<etl::LogfileEnumerator>(fmtDb_, etlPath);
+  if (etlPath.extension() == ".etl")
+  {
+    logTrace_ = std::make_unique<etl::LogfileEnumerator>(fmtDb_, etlPath);
+  }
+  else
+  {
+    logTrace_ = std::make_unique<etl::TxtfileEnumerator>(fmtDb_, etlPath);
+  }
   windowTitle_ = etlPath.filename().wstring() + L" - ETRACE LOG";
   return true;
 }
@@ -564,6 +571,19 @@ bool LogContext::ExportFromDialog(const std::function<bool (size_t *n)> &enumera
     {
       return false;
     }
+    {
+      std::string txt;
+      for (int c = 0; c < ColumnCount(); ++c)
+      {
+        if (!txt.empty())
+        {
+          txt += '\t';
+        }
+        txt += converter.to_bytes(columnNames[c]);
+      }
+      rstrip(txt) += "\r\n";
+      fwrite(txt.c_str(), 1, txt.length(), fh);
+    }
     size_t i = 0;
     while(enumerator(&i))
     {
@@ -591,7 +611,7 @@ bool LogContext::ExportFromDialog(const std::function<bool (size_t *n)> &enumera
 
 bool LogContext::LoadEtlFromDialog()
 {
-  if(FileOpenDialog(L"Event Trace Log Files\0*.etl\0\0",
+  if(FileOpenDialog(L"Event Trace Log Files\0*.etl;*.log\0\0",
                     [this](const fs::path &filePath)
                     {
                       return LoadEventLogFile(filePath);
