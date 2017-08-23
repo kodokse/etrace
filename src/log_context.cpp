@@ -704,24 +704,26 @@ void LogContext::ActivateColumn(NMLISTVIEW * listViewInfo)
     return;
   }
   auto &colInfo = columns_[listViewInfo->iSubItem]->columnColor;
-  bool redraw = selectedColumn_ != listViewInfo->iSubItem;
-  for(auto &cc : colInfo)
+  if (selectedColumn_ != listViewInfo->iSubItem)
   {
-    if(cc.second.bgColor == 0)
+    for (auto &cc : colInfo)
     {
-      cc.second.bgColor = GenerateColor(cc.second.index, colInfo.size());
-      if(UseWhiteText(cc.second.bgColor))
+      if (cc.second.bgColor == 0)
       {
-        cc.second.txtColor = RGB(0xFF, 0xFF, 0xFF);
+        cc.second.bgColor = GenerateColor(cc.second.index, colInfo.size());
+        if (UseWhiteText(cc.second.bgColor))
+        {
+          cc.second.txtColor = RGB(0xFF, 0xFF, 0xFF);
+        }
       }
-      redraw = true;
     }
+    selectedColumn_ = listViewInfo->iSubItem;
   }
-  selectedColumn_ = listViewInfo->iSubItem;
-  if(redraw)
+  else
   {
-    InvalidateView(LVSICF_NOSCROLL);
+    selectedColumn_ = -1;
   }
+  InvalidateView(LVSICF_NOSCROLL);
 }
 
 void LogContext::SetItemText(NMLVDISPINFOW *plvdi)
