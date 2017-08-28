@@ -8,6 +8,7 @@
 #include "targetver.h"
 
 #define WIN32_LEAN_AND_MEAN             // Exclude rarely-used stuff from Windows headers
+#define NOMINMAX
 // Windows Header Files:
 #include <ampp/ampp.h>
 #include <windows.h>
@@ -27,6 +28,7 @@
 #include <functional>
 #include <regex>
 #include <map>
+#include <optional>
 
 namespace fs = std::tr2::sys;
 
@@ -35,5 +37,6 @@ namespace fs = std::tr2::sys;
 #include <ampp/etl/time_util.h>
 #include <ampp/etl/trace_enumerator.h>
 #include <ampp/etl/guid_util.h>
+#include <ampp/etl/string_util.h>
 
 // TODO: reference additional headers your program requires here

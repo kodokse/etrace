@@ -16,6 +16,8 @@ struct RowContext
 {
   bool selected;
   float colorFade;
+  int lastFilterCount;
+  int groupId;
   RowContext();
 };
 
@@ -56,6 +58,7 @@ public:
   bool LoadEtlFromDialog();
   bool ExportFromDialogAll();
   bool ExportFromDialogSelected();
+  bool CopySelected();
   void SetMainWindow(HWND hWnd);
   bool BeginTrace();
   void EndTrace();
@@ -69,17 +72,21 @@ public:
   void UpdateFilterText(int controlId);
   void ClearTrace();
 private:
-  bool ExportFromDialog(const std::function<bool(size_t *n)> &enumerator);
+  bool ExportFromDialog(const std::function<bool(size_t *n)> &enumerator, bool includeHeader);
+  bool ExtractTextLines(const std::function<bool(size_t *n)> &enumerator, const std::function<bool(const std::wstring &txt)> &output, bool includeHeader);
   bool FileOpenDialog(LPCWSTR filter, const std::function<bool(const fs::path &)> &fileHandler, DWORD flags = 0);
   bool FileSaveDialog(LPCWSTR filter, const std::function<bool(const fs::path &)> &fileHandler, DWORD flags = 0, const std::wstring &suggestedFileName = L"");
   bool SetItemColorFromColumn(NMLVCUSTOMDRAW *lvd);
-  bool ColorFilterLine(size_t line);
+  float GetFilterLineFade(size_t line);
   bool ResetViewNoInvalidate();
   void InitializeRowContext(size_t line);
   RowContext *GetRowContext(size_t line);
   const RowContext *GetRowContext(size_t line) const;
+  std::function<bool(size_t *n)> SelectedLinesEnumerator() const;
+  static LRESULT CALLBACK ListViewSubClassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 private:
   HINSTANCE programInstance_;
+  WNDPROC orgListViewProc_;
   HWND mainWindow_;
   HWND listView_;
   DWORD itemCounter_;
@@ -94,5 +101,8 @@ private:
   COLORREF customColors_[16];
   std::wstring windowTitle_;
   std::wstring sessionName_;
+  int filterId_;
+  std::mutex rowInfoLock_;
+  int groupCounter_;
 };
 

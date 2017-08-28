@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include "log_context.h"
 #include "win_util.h"
+#include "resource.h"
 
 #define IDC_TRACELIST 201
 #define IDC_FIRSTFILTER 202
@@ -119,6 +120,8 @@ COLORREF GenerateColor(int current, int unique_element_count)
 RowContext::RowContext()
   : selected(false)
   , colorFade(1.0f)
+  , lastFilterCount(-1)
+  , groupId(0)
 {
 }
 
@@ -158,6 +161,8 @@ LogContext::LogContext(HINSTANCE programInstance)
   , listView_(nullptr)
   , itemCounter_(0)
   , selectedColumn_(-1)
+  , filterId_(0)
+  , groupCounter_(0)
 {
 }
 
@@ -174,7 +179,7 @@ inline COLORREF ColorLerp(COLORREF c1, COLORREF c2, double t)
     lerp(GetBValue(c1), GetBValue(c2), t));
 }
 
-bool LogContext::ColorFilterLine(size_t line)
+float LogContext::GetFilterLineFade(size_t line)
 {
   for (auto &&flt : colorFilters_)
   {
@@ -186,25 +191,12 @@ bool LogContext::ColorFilterLine(size_t line)
         auto &&text = logTrace_->GetItemValue(line, item);
         if (flt.first(c, text))
         {
-          auto rc = GetRowContext(line);
-          if (rc)
-          {
-            rc->colorFade = flt.second;
-          }
-          return true;
-        }
-        else
-        {
-          auto rc = GetRowContext(line);
-          if (rc)
-          {
-            rc->colorFade = 1.0f;
-          }
+          return flt.second;
         }
       }
     }
   }
-  return false;
+  return 1.0f;
 }
 
 bool LogContext::ResetViewNoInvalidate()
@@ -227,6 +219,7 @@ void LogContext::InitializeRowContext(size_t line)
   auto md = logTrace_->GetItemMetadata(line);
   if (!md)
   {
+    std::lock_guard<std::mutex> l(rowInfoLock_);
     rowInfo_.push_back(std::make_unique<RowContext>());
     logTrace_->SetItemMetadata(line, rowInfo_.back().get());
   }
@@ -242,15 +235,27 @@ const RowContext *LogContext::GetRowContext(size_t line) const
   return reinterpret_cast<const RowContext *>(logTrace_->GetItemMetadata(line));
 }
 
+std::function<bool(size_t*n)> LogContext::SelectedLinesEnumerator() const
+{
+  return std::function<bool(size_t*n)>([this](size_t *n)
+  {
+    int pos = *n == std::numeric_limits<size_t>::max() ? -1 : *n;
+    pos = ListView_GetNextItem(listView_, pos, LVNI_SELECTED);
+    if (pos >= 0)
+    {
+      *n = pos;
+      return true;
+    }
+    return false;
+  });
+}
+
 void LogContext::ApplyFilters()
 {
   if(logTrace_)
   {
     logTrace_->ApplyFilters();
-    for (auto i = 0; i < logTrace_->GetItemCount(); ++i)
-    {
-      ColorFilterLine(i);
-    }
+    ++filterId_;
   }
 }
 
@@ -295,6 +300,8 @@ bool LogContext::InitTraceList()
   }
 
   listView_ = hWnd;
+  SetPropW(listView_, L"this", this);
+  orgListViewProc_ = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(listView_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&ListViewSubClassProc)));
 
   ListView_SetExtendedListViewStyleEx(hWnd, LVS_EX_FULLROWSELECT, LVS_EX_FULLROWSELECT);
 
@@ -506,27 +513,6 @@ bool LogContext::LoadPdbFromDialog()
   return false;
 }
 
-template <class CharT>
-bool is_white(CharT c)
-{
-  return c == ' ' || c == '\t' || c == '\r' || c == '\n';
-}
-
-template <class CharT, class TraitsT>
-std::basic_string<CharT, TraitsT> &rstrip(std::basic_string<CharT, TraitsT> &s)
-{
-  auto l = s.length();
-  while (l > 0 && is_white(s[l - 1]))
-  {
-    --l;
-  }
-  if (l < s.length())
-  {
-    s.resize(l);
-  }
-  return s;
-}
-
 bool LogContext::ExportFromDialogAll()
 {
   size_t count = 0;
@@ -538,28 +524,55 @@ bool LogContext::ExportFromDialogAll()
       return true;
     }
     return false;
-  });
+  }, true);
 }
 
 bool LogContext::ExportFromDialogSelected()
 {
-  int pos = -1;
-  return ExportFromDialog([this, &pos](size_t *n)
-  {
-    pos = ListView_GetNextItem(listView_, pos, LVNI_SELECTED);
-    if (pos >= 0)
-    {
-      *n = pos;
-      return true;
-    }
-    return false;
-  });
+  return ExportFromDialog(SelectedLinesEnumerator(), false);
 }
 
-bool LogContext::ExportFromDialog(const std::function<bool (size_t *n)> &enumerator)
+template <class StringT>
+bool CopyToClipboard(HWND owner, const StringT &txt)
+{
+  using CharT = typename StringT::value_type;
+  if (!OpenClipboard(owner))
+  {
+    return false;
+  }
+  EmptyClipboard();
+  auto size = txt.length() * sizeof(CharT);
+  auto hmem = GlobalAlloc(GMEM_MOVEABLE, size + sizeof(CharT));
+  if (!hmem)
+  {
+    CloseClipboard();
+    return false;
+  }
+  auto dst = GlobalLock(hmem);
+  memcpy(dst, txt.c_str(), size);
+  ((CharT *)dst)[txt.length()] = 0;
+  GlobalUnlock(hmem);
+  SetClipboardData(sizeof(CharT) == 1 ? CF_TEXT : CF_UNICODETEXT, hmem);
+  CloseClipboard();
+  return true;
+}
+
+bool LogContext::CopySelected()
+{
+  std::wstring allLines;
+  ExtractTextLines(SelectedLinesEnumerator(),
+                   [&allLines](const std::wstring &txt)
+                   {
+                     allLines += txt;
+                     return true;
+                   }, false);
+  return !allLines.empty() && CopyToClipboard(mainWindow_, allLines);
+}
+
+bool LogContext::ExportFromDialog(const std::function<bool (size_t *n)> &enumerator, bool includeHeader)
 {
   if (FileSaveDialog(L"Text File (*.txt;*.log)\0*.txt;*.log\0\0",
-    [this, enumerator](const fs::path &filePath)
+    [this, enumerator, includeHeader](const fs::path &filePath)
   {
     if (!fs::exists(filePath.parent_path()))
     {
@@ -571,42 +584,58 @@ bool LogContext::ExportFromDialog(const std::function<bool (size_t *n)> &enumera
     {
       return false;
     }
+    const bool rv = ExtractTextLines(enumerator, [&converter, fh](const std::wstring &txt)
     {
-      std::string txt;
-      for (int c = 0; c < ColumnCount(); ++c)
-      {
-        if (!txt.empty())
-        {
-          txt += '\t';
-        }
-        txt += converter.to_bytes(columnNames[c]);
-      }
-      rstrip(txt) += "\r\n";
-      fwrite(txt.c_str(), 1, txt.length(), fh);
-    }
-    size_t i = 0;
-    while(enumerator(&i))
-    {
-      std::string txt;
-      for (int c = 0; c < ColumnCount(); ++c)
-      {
-        if (!txt.empty())
-        {
-          txt += '\t';
-        }
-        txt += converter.to_bytes(logTrace_->GetItemValue(i, ColumnToDataItem(c)));
-      }
-      rstrip(txt) += "\r\n";
-      fwrite(txt.c_str(), 1, txt.length(), fh);
-    }
+      std::string tmp = converter.to_bytes(txt);
+      return fwrite(tmp.c_str(), 1, tmp.length(), fh) == tmp.length();
+    }, includeHeader);
     fclose(fh);
-    return true;
+    return rv;
   }, 0, sessionName_ + L".log"))
   {
     InvalidateView(LVSICF_NOSCROLL);
     return true;
   }
   return false;
+}
+
+bool LogContext::ExtractTextLines(const std::function<bool(size_t *n)> &enumerator,
+                                  const std::function<bool(const std::wstring &txt)> &output,
+                                  bool includeHeader)
+{
+  if (includeHeader)
+  {
+    std::wstring txt;
+    for (int c = 0; c < ColumnCount(); ++c)
+    {
+      if (!txt.empty())
+      {
+        txt += L'\t';
+      }
+      txt += columnNames[c];
+    }
+    etl::TrimR(txt) += L"\r\n";
+    output(txt);
+  }
+  size_t i = std::numeric_limits<size_t>::max();
+  while (enumerator(&i))
+  {
+    std::wstring txt;
+    for (int c = 0; c < ColumnCount(); ++c)
+    {
+      if (!txt.empty())
+      {
+        txt += L'\t';
+      }
+      txt += logTrace_->GetItemValue(i, ColumnToDataItem(c));
+    }
+    etl::TrimR(txt) += L"\r\n";
+    if (!output(txt))
+    {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool LogContext::LoadEtlFromDialog()
@@ -630,11 +659,11 @@ void LogContext::SetMainWindow(HWND hWnd)
 
 bool LogContext::BeginTrace()
 {
-  if(!logTrace_)
+  if (!logTrace_)
   {
     return false;
   }
-  for(int column = 0; column < ColumnCount(); ++column)
+  for (int column = 0; column < ColumnCount(); ++column)
   {
     colorFilters_.push_back(std::make_pair([this, column](int col, const std::wstring &val) -> bool {
       return col == column && !val.empty() ? !FilterColumn(ColumnToDataItem(col), val) : false;
@@ -647,7 +676,7 @@ bool LogContext::BeginTrace()
       const auto lineNo = itemCount - 1;
       InitializeRowContext(lineNo);
       size_t totalMaxLength = 0;
-      for (int i = 0; i < _countof(columnNames); ++i)
+      for (int i = 1; i < _countof(columnNames); ++i)
       {
         auto item = ColumnToDataItem(i);
         if (item != etl::TraceEventDataItem::MAX_ITEM)
@@ -741,12 +770,29 @@ bool LogContext::SetItemColorFromColumn(NMLVCUSTOMDRAW *lvd)
   {
     return false;
   }
-  auto &&s = logTrace_->GetItemValue(lvd->nmcd.dwItemSpec, ColumnToDataItem(selectedColumn_));
-  if (s.empty())
+  ColorInfo ci = { 0 };
+  if (selectedColumn_ == 0)
   {
-    return false;
+    auto rc = GetRowContext(lvd->nmcd.dwItemSpec);
+    if (!rc)
+    {
+      return false;
+    }
+    if (rc->groupId <= 0)
+    {
+      return false;
+    }
+    ci = columns_[selectedColumn_]->columnColor[std::to_wstring(rc->groupId)];
   }
-  auto &ci = columns_[selectedColumn_]->columnColor[s];
+  else
+  {
+    auto &&s = logTrace_->GetItemValue(lvd->nmcd.dwItemSpec, ColumnToDataItem(selectedColumn_));
+    if (s.empty())
+    {
+      return false;
+    }
+    ci = columns_[selectedColumn_]->columnColor[s];
+  }
   if (ci.bgColor == 0)
   {
     ci.bgColor = GenerateColor(ci.index, columns_[selectedColumn_]->columnColor.size());
@@ -772,7 +818,12 @@ void LogContext::SetItemColors(NMLVCUSTOMDRAW *lvd)
   auto colPair = reinterpret_cast<RowContext *>(logTrace_->GetItemMetadata(lvd->nmcd.dwItemSpec));
   if (!colPair)
   {
-    return;
+    InitializeRowContext(lvd->nmcd.dwItemSpec);
+    colPair = reinterpret_cast<RowContext *>(logTrace_->GetItemMetadata(lvd->nmcd.dwItemSpec));
+  }
+  if (colPair->lastFilterCount != filterId_)
+  {
+    colPair->colorFade = GetFilterLineFade(lvd->nmcd.dwItemSpec);
   }
   lvd->clrTextBk = ColorLerp(0x00FFFFFF, lvd->clrTextBk, colPair->colorFade);
   lvd->clrText = ColorLerp(0x00FFFFFF, lvd->clrText, colPair->colorFade);
@@ -784,37 +835,96 @@ void LogContext::HandleContextMenu()
   {
     return;
   }
+  //
   int selIdx = ListView_GetSelectionMark(listView_);
   if(selIdx < 0)
   {
     return;
   }
-  if (selectedColumn_ < 0)
+  const auto selCount = ListView_GetSelectedCount(listView_);
+  ColorInfo *ci = nullptr;
+  if (selectedColumn_ == 0 || selCount > 1)
   {
-    return;
+    // create group
+    //const auto groupId = ++groupCounter_;
+    std::optional<int> groupId;
+    auto enumerator = SelectedLinesEnumerator();
+    size_t n = std::numeric_limits<size_t>::max();
+    // reuse a group id if there is one within the selection
+    while (enumerator(&n))
+    {
+      auto rc = GetRowContext(n);
+      if (rc)
+      {
+        if (rc->groupId > 0)
+        {
+          groupId = rc->groupId;
+          break;
+        }
+      }
+    }
+    // create a new otherwise
+    if (!groupId)
+    {
+      groupId = ++groupCounter_;
+    }
+    n = std::numeric_limits<size_t>::max();
+    while (enumerator(&n))
+    {
+      auto rc = GetRowContext(n);
+      if (rc)
+      {
+        rc->groupId = *groupId;
+      }
+    }
+    ci = &columns_[0]->columnColor[std::to_wstring(*groupId)];
+    if (ci->bgColor == 0)
+    {
+      ci->index = columns_[0]->columnColor.size();
+      ci->bgColor = GenerateColor(ci->index, columns_[0]->columnColor.size());
+      if (UseWhiteText(ci->bgColor))
+      {
+        ci->txtColor = RGB(0xFF, 0xFF, 0xFF);
+      }
+      else
+      {
+        ci->txtColor = 0;
+      }
+    }
   }
-  auto &&s = logTrace_->GetItemValue(selIdx, ColumnToDataItem(selectedColumn_));
-  if(s.empty())
+  else
   {
-    return;
+    if (selectedColumn_ < 0)
+    {
+      return;
+    }
+    auto &&s = logTrace_->GetItemValue(selIdx, ColumnToDataItem(selectedColumn_));
+    if (s.empty())
+    {
+      return;
+    }
+    ci = &columns_[selectedColumn_]->columnColor[s];
   }
-  auto &ci = columns_[selectedColumn_]->columnColor[s];
   CHOOSECOLORW color;
   ZeroMemory(&color, sizeof(color));
   color.lStructSize = sizeof(color);
   color.hwndOwner = mainWindow_;
   color.lpCustColors = customColors_;
   color.Flags = CC_ANYCOLOR;
-  color.rgbResult = ci.bgColor;
+  color.rgbResult = ci->bgColor;
   color.Flags |= CC_RGBINIT;
   if(!ChooseColorW(&color))
   {
     return;
   }
-  ci.bgColor = color.rgbResult;
-  if(UseWhiteText(ci.bgColor))
+  ci->bgColor = color.rgbResult;
+  if(UseWhiteText(ci->bgColor))
   {
-    ci.txtColor = RGB(0xFF, 0xFF, 0xFF);
+    ci->txtColor = RGB(0xFF, 0xFF, 0xFF);
+  }
+  else
+  {
+    ci->txtColor = 0;
   }
   InvalidateView(LVSICF_NOSCROLL);
 }
@@ -890,7 +1000,6 @@ LRESULT CALLBACK ColumnContext::SubClassProc(HWND hwnd, UINT msg, WPARAM wParam,
       return 0;
     }
     break;
-
   case WM_KEYUP:
   case WM_CHAR:
     switch (wParam)
@@ -905,3 +1014,54 @@ LRESULT CALLBACK ColumnContext::SubClassProc(HWND hwnd, UINT msg, WPARAM wParam,
   //  Call the original window procedure for default processing. 
   return CallWindowProcW(self->orgProc_, hwnd, msg, wParam, lParam);
 }
+
+LRESULT CALLBACK LogContext::ListViewSubClassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+  auto self = reinterpret_cast<LogContext *>(GetPropW(hwnd, L"this"));
+  if (!self)
+  {
+    return 0;
+  }
+  switch (msg)
+  {
+  case WM_KEYDOWN:
+    switch (wParam)
+    {
+    case VK_TAB:
+      //SendMessage(hwndMain, WM_TAB, 0, 0);
+      return 0;
+    case VK_ESCAPE:
+      self->ResetView();
+      //SendMessage(hwndMain, WM_ESC, 0, 0);
+      return 0;
+    case VK_RETURN:
+      //SendMessage(hwndMain, WM_ENTER, 0, 0);
+      return 0;
+    }
+    break;
+  case WM_COMMAND:
+  {
+    int wmId = LOWORD(wParam);
+    switch (wmId)
+    {
+    case ID_EDIT_COPY:
+      self->CopySelected();
+      break;
+    }
+  }
+  break;
+  case WM_KEYUP:
+  case WM_CHAR:
+    switch (wParam)
+    {
+    case VK_TAB:
+    case VK_ESCAPE:
+    case VK_RETURN:
+      return 0;
+    }
+  }
+
+  //  Call the original window procedure for default processing. 
+  return CallWindowProcW(self->orgListViewProc_, hwnd, msg, wParam, lParam);
+}
+

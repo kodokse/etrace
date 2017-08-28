@@ -164,7 +164,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
   MSG msg;
 
   // Main message loop:
-  while(GetMessage(&msg, nullptr, 0, 0))
+  while(GetMessage(&msg, nullptr, 0, 0) > 0)
   {
     if(!TranslateAccelerator(msg.hwnd, hAccelTable, &msg)) // && !IsDialogMessage(msg.hwnd, &msg))
     //if(msg.hwnd == NULL || !IsDialogMessage(msg.hwnd, &msg))
@@ -372,6 +372,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         break;
       case ID_FILE_EXPORTSELECTED:
         context->ExportFromDialogSelected();
+        break;
+      case ID_EDIT_COPY:
+        context->CopySelected();
         break;
       default:
         return DefWindowProc(hWnd, message, wParam, lParam);
