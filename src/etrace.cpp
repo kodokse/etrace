@@ -136,6 +136,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
   CommandLineMap cmdLineMap;
   cmdLineMap[L"pdb"];
+  auto &comVec = cmdLineMap[L"com"];
   auto &sessionNameVec = cmdLineMap[L"live"];
   auto &logVec = cmdLineMap[L"log"];
   ParseCommandLine(lpCmdLine, cmdLineMap);
@@ -143,6 +144,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
   for(auto &&pdbs : cmdLineMap[L"pdb"])
   {
     context.AddPdbProvider(pdbs);
+  }
+  if (!comVec.empty())
+  {
+    auto it = comVec.front().begin();
+    auto portNum = etl::CopyWhile(it, comVec.front().end(), [](wchar_t ch) {return etl::IntTraits<wchar_t, int>::IsDigit(ch, 10); });
+    if (!portNum.empty())
+    {
+      context.SetComPort(L"\\\\.\\COM" + portNum);
+    }
   }
   if(!sessionNameVec.empty())
   {

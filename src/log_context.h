@@ -71,6 +71,10 @@ public:
   bool IsFilterMessage(int controlId) const;
   void UpdateFilterText(int controlId);
   void ClearTrace();
+  void SetComPort(const std::wstring &comPort);
+  bool StartCom();
+  void StopCom();
+  //
 private:
   bool ExportFromDialog(const std::function<bool(size_t *n)> &enumerator, bool includeHeader);
   bool ExtractTextLines(const std::function<bool(size_t *n)> &enumerator, const std::function<bool(const std::wstring &txt)> &output, bool includeHeader);
@@ -84,6 +88,8 @@ private:
   const RowContext *GetRowContext(size_t line) const;
   std::function<bool(size_t *n)> SelectedLinesEnumerator() const;
   static LRESULT CALLBACK ListViewSubClassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+  void InsertText(const std::wstring &t);
+  void InsertText(const std::map<etl::TraceEventDataItem, std::wstring> &t);
 private:
   HINSTANCE programInstance_;
   WNDPROC orgListViewProc_;
@@ -104,5 +110,8 @@ private:
   int filterId_;
   std::mutex rowInfoLock_;
   int groupCounter_;
+  std::wstring comPort_;
+  std::unique_ptr<std::thread> comThread_;
+  bool runComThread_;
 };
 

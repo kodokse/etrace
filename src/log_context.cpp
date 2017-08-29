@@ -715,11 +715,131 @@ bool LogContext::BeginTrace()
     ListView_SetItemCountEx(listView_, itemCount, LVSICF_NOSCROLL | flags);
   });
   SetWindowTextW(mainWindow_, windowTitle_.c_str());
-  return logTrace_->Start();
+  bool rv = logTrace_->Start();
+  if (!comPort_.empty())
+  {
+    rv = StartCom();
+  }
+  return rv;
+}
+
+void LogContext::SetComPort(const std::wstring &comPort)
+{
+  comPort_ = comPort;
+}
+
+void LogContext::StopCom()
+{
+  runComThread_ = false;
+  if (comThread_ && comThread_->joinable())
+  {
+    comThread_->join();
+  }
+}
+
+bool LogContext::StartCom()
+{
+  enum class ComState {Connecting, RequestData, WaitForData, ConsumeData};
+  comThread_ = std::make_unique<std::thread>([this]()
+  {
+    runComThread_ = true;
+    OVERLAPPED ov = { 0 };
+    ov.hEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+    char tmp[2000];
+    DWORD bytesRead = 0;
+    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> converter;
+    ComState state = ComState::Connecting;
+    HANDLE h = INVALID_HANDLE_VALUE;
+    while (runComThread_)
+    {
+      if (state == ComState::Connecting)
+      {
+        if (h != INVALID_HANDLE_VALUE)
+        {
+          CloseHandle(h);
+        }
+        h = CreateFileW(comPort_.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+        if (h != INVALID_HANDLE_VALUE)
+        {
+          DCB dcb = { 0 };
+          if (GetCommState(h, &dcb))
+          {
+            dcb.BaudRate = CBR_19200;
+            if (SetCommState(h, &dcb))
+            {
+              state = ComState::RequestData;
+            }
+          }
+        }
+        if (state == ComState::Connecting)
+        {
+          Sleep(500);
+        }
+      }
+      if (state == ComState::RequestData)
+      {
+        if (ReadFile(h, tmp, sizeof(tmp), &bytesRead, &ov))
+        {
+          state = ComState::ConsumeData;
+        }
+        else if (GetLastError() == ERROR_IO_PENDING)
+        {
+          state = ComState::WaitForData;
+        }
+        else
+        {
+          std::wstringstream ss;
+          ss << L"ReadFile ERROR: " << GetLastError();
+          InsertText(ss.str());
+          state = ComState::Connecting;
+        }
+      }
+      if (state == ComState::WaitForData)
+      {
+        auto wait = WaitForSingleObject(ov.hEvent, 500);
+        if (wait == 0)
+        {
+          if (GetOverlappedResult(h, &ov, &bytesRead, FALSE))
+          {
+            state = ComState::ConsumeData;
+          }
+          else
+          {
+            std::wstringstream ss;
+            ss << L"GetOverlappedResult ERROR: " << GetLastError();
+            InsertText(ss.str());
+            state = ComState::Connecting;
+          }
+        }
+      }
+      if(state == ComState::ConsumeData)
+      {
+        std::wstring str = converter.from_bytes(tmp, tmp + bytesRead);
+        auto sv = etl::Split(str, L'\n');
+        std::map<etl::TraceEventDataItem, std::wstring> txtMap{ {etl::TraceEventDataItem::ModuleName, comPort_.substr(4)} };
+        for (auto &&s : sv)
+        {
+          txtMap[etl::TraceEventDataItem::Message] = etl::TrimR(s);
+          InsertText(txtMap);
+        }
+        state = ComState::RequestData;
+      }
+    }
+    if (h != INVALID_HANDLE_VALUE)
+    {
+      CloseHandle(h);
+    }
+  });
+  return true;
 }
 
 void LogContext::EndTrace()
 {
+  runComThread_ = false;
+  if (comThread_ && comThread_->joinable())
+  {
+    comThread_->join();
+  }
   if(logTrace_)
   {
     logTrace_->Stop();
@@ -972,6 +1092,28 @@ void LogContext::ClearTrace()
   }
   ResetViewNoInvalidate();
   InvalidateView(0);
+}
+
+void LogContext::InsertText(const std::wstring &t)
+{
+  std::map<etl::TraceEventDataItem, std::wstring> tm;
+  tm[etl::TraceEventDataItem::Message] = t;
+  InsertText(tm);
+}
+
+void LogContext::InsertText(const std::map<etl::TraceEventDataItem, std::wstring> &t)
+{
+  using namespace etl;
+  if (!logTrace_)
+  {
+    return;
+  }
+  needRedraw_ = true;
+  logTrace_->InjectItem(GetCurrentLocalFileTime(), [&t](etl::TraceEventDataItem item)
+  {
+    auto it = t.find(item);
+    return it != t.end() ? it->second : L"";
+  });
 }
 
 ///////
