@@ -118,8 +118,7 @@ COLORREF GenerateColor(int current, int unique_element_count)
 ////////////////////////
 
 RowContext::RowContext()
-  : selected(false)
-  , colorFade(1.0f)
+  : colorFade(1.0f)
   , lastFilterCount(-1)
   , groupId(0)
 {
@@ -163,6 +162,7 @@ LogContext::LogContext(HINSTANCE programInstance)
   , selectedColumn_(-1)
   , filterId_(0)
   , groupCounter_(0)
+  , currentMatchingLine_(std::numeric_limits<size_t>::max())
 {
 }
 
@@ -203,6 +203,7 @@ bool LogContext::ResetViewNoInvalidate()
 {
   bool invalidate = selectedColumn_ >= 0;
   selectedColumn_ = -1;
+  currentMatchingLine_ = -1;
   for (auto &c : columns_)
   {
     SetWindowTextW(c->filterWindow, L"");
@@ -261,6 +262,7 @@ void LogContext::ApplyFilters()
 
 bool LogContext::AddPdbProvider(const fs::path &pdbPath)
 {
+  pdbPaths_.push_back(pdbPath);
   fmtDb_.AddProvider(etl::PdbProvider(pdbManager_, pdbPath));
   return true;
 }
@@ -291,8 +293,18 @@ bool LogContext::InitTraceList()
 {
   RECT r;
   GetClientRect(mainWindow_, &r);
-  HWND hWnd = CreateWindowExW(0, WC_LISTVIEW, L"", WS_BORDER | WS_VISIBLE | WS_TABSTOP | WS_CHILD | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_OWNERDATA,
-                            r.left, r.top + FILTER_HEIGHT, Width(r), Height(r) - FILTER_HEIGHT, mainWindow_, reinterpret_cast<HMENU>(IDC_TRACELIST), programInstance_, nullptr);
+  HWND hWnd = CreateWindowExW(0,
+                              WC_LISTVIEW,
+                              L"",
+                              WS_BORDER | WS_VISIBLE | WS_TABSTOP | WS_CHILD | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_OWNERDATA,
+                              r.left,
+                              r.top + FILTER_HEIGHT,
+                              Width(r),
+                              Height(r) - FILTER_HEIGHT,
+                              mainWindow_,
+                              reinterpret_cast<HMENU>(IDC_TRACELIST),
+                              programInstance_,
+                              nullptr);
 
   if(!hWnd)
   {
@@ -313,8 +325,18 @@ bool LogContext::InitTraceList()
   int x = r.left;
   for(int i = 0; i < colCount; ++i)
   {
-    HWND cbWnd = CreateWindowExW(0, WC_COMBOBOX, L"", WS_BORDER | WS_VISIBLE | WS_TABSTOP | WS_CHILD | CBS_DROPDOWN | CBS_HASSTRINGS,
-                            x, r.top, colWidth, FILTER_HEIGHT, mainWindow_, reinterpret_cast<HMENU>(IDC_FIRSTFILTER + i), programInstance_, nullptr);
+    HWND cbWnd = CreateWindowExW(0,
+                                 WC_COMBOBOX,
+                                 L"",
+                                 WS_BORDER | WS_VISIBLE | WS_TABSTOP | WS_CHILD | CBS_DROPDOWN | CBS_HASSTRINGS,
+                                 x,
+                                 r.top,
+                                 colWidth,
+                                 FILTER_HEIGHT,
+                                 mainWindow_,
+                                 reinterpret_cast<HMENU>(IDC_FIRSTFILTER + i),
+                                 programInstance_,
+                                 nullptr);
     x += colWidth;
     //
     columns_.push_back(std::make_unique<ColumnContext>(cbWnd, ratio, this));
@@ -328,7 +350,9 @@ bool LogContext::InitTraceList()
       hwndEdit = ChildWindowFromPoint(cbWnd, pt);
     } while (hwndEdit == cbWnd);
     SetPropW(hwndEdit, L"this", columns_.back().get());
-    columns_.back()->orgProc_ = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(hwndEdit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&ColumnContext::SubClassProc)));
+    columns_.back()->orgProc_ = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(hwndEdit,
+                                                                            GWLP_WNDPROC,
+                                                                            reinterpret_cast<LONG_PTR>(&ColumnContext::SubClassProc)));
     //
     LVCOLUMN col;
     ZeroMemory(&col, sizeof(col));
@@ -390,6 +414,23 @@ bool LogContext::FilterColumn(etl::TraceEventDataItem item, const std::wstring &
   }
   auto res = columns_[column]->GetFilterText();
   if(ValidRegEx(res))
+  {
+    std::wregex r(res, std::regex_constants::icase);
+    rv = std::regex_search(txt, r);
+  }
+  return rv;
+}
+
+bool LogContext::FilterColumnOnlyMatch(etl::TraceEventDataItem item, const std::wstring &txt) const
+{
+  bool rv = false;
+  int column = DataItemToColumn(item);
+  if (column < 0)
+  {
+    return false;
+  }
+  auto res = columns_[column]->GetFilterText();
+  if (ValidRegEx(res))
   {
     std::wregex r(res, std::regex_constants::icase);
     rv = std::regex_search(txt, r);
@@ -704,7 +745,6 @@ bool LogContext::BeginTrace()
         }
         RepositionControls();
       }
-      ColorFilterLine(itemCount - 1);
     }
     DWORD flags = LVSICF_NOINVALIDATEALL;
     if (needRedraw_)
@@ -734,6 +774,73 @@ void LogContext::StopCom()
   if (comThread_ && comThread_->joinable())
   {
     comThread_->join();
+  }
+}
+
+void LogContext::GotoNextMatch()
+{
+  GotoMatch(1);
+}
+
+void LogContext::GotoPreviousMatch()
+{
+  GotoMatch(-1);
+}
+
+void LogContext::ReloadAllPdbs()
+{
+  // despite its name AddProvider will not blindly add more and more providers but rather
+  // add those that doesn't exist...
+  for (auto &&p : pdbPaths_)
+  {
+    fmtDb_.AddProvider(etl::PdbProvider(pdbManager_, p));
+  }
+}
+
+void LogContext::GotoMatch(int dir)
+{
+  auto ri = currentMatchingLine_ + dir;
+  size_t testCount = 0;
+  bool found = false;
+  do
+  {
+    if (ri >= static_cast<int>(logTrace_->GetItemCount()))
+    {
+      ri = 0;
+    }
+    if (ri < 0)
+    {
+      ri = static_cast<int>(logTrace_->GetItemCount()) - 1;
+    }
+    for (auto eti = etl::TraceEventDataItem::TraceIndex; eti < etl::TraceEventDataItem::MAX_ITEM; ++eti)
+    {
+      if (FilterColumnOnlyMatch(eti, logTrace_->GetItemValue(ri, eti)))
+      {
+        found = true;
+        break;
+      }
+    }
+    if (!found)
+    {
+      ri += dir;
+      ++testCount;
+    }
+  } while (!found && testCount < logTrace_->GetItemCount());
+  //
+  if (found)
+  {
+    const auto old = currentMatchingLine_;
+    currentMatchingLine_ = ri;
+    ListView_EnsureVisible(listView_, currentMatchingLine_, FALSE);
+    const auto topIndex = ListView_GetTopIndex(listView_);
+    RECT topRect = {0};
+    ListView_GetItemRect(listView_, topIndex, &topRect, LVIR_BOUNDS);
+    RECT foundRect = {0};
+    ListView_GetItemRect(listView_, currentMatchingLine_, &foundRect, LVIR_BOUNDS);
+    const int dy = foundRect.top - topRect.top;
+    ListView_Scroll(listView_, 0, dy);
+    ListView_Update(listView_, currentMatchingLine_);
+    ListView_Update(listView_, old);
   }
 }
 
@@ -816,11 +923,16 @@ bool LogContext::StartCom()
       {
         std::wstring str = converter.from_bytes(tmp, tmp + bytesRead);
         auto sv = etl::Split(str, L'\n');
+        auto timeStamp = etl::GetCurrentLocalFileTime();
         std::map<etl::TraceEventDataItem, std::wstring> txtMap{ {etl::TraceEventDataItem::ModuleName, comPort_.substr(4)} };
         for (auto &&s : sv)
         {
-          txtMap[etl::TraceEventDataItem::Message] = etl::TrimR(s);
-          InsertText(txtMap);
+          etl::TrimR(s);
+          if (s.length() > 0)
+          {
+            txtMap[etl::TraceEventDataItem::Message] = s;
+            InsertText(timeStamp, txtMap);
+          }
         }
         state = ComState::RequestData;
       }
@@ -940,6 +1052,11 @@ void LogContext::SetItemColors(NMLVCUSTOMDRAW *lvd)
   {
     InitializeRowContext(lvd->nmcd.dwItemSpec);
     colPair = reinterpret_cast<RowContext *>(logTrace_->GetItemMetadata(lvd->nmcd.dwItemSpec));
+  }
+  if (currentMatchingLine_ == lvd->nmcd.dwItemSpec)
+  {
+    //lvd->clrTextBk = RGB(0x77, 0xFF, 0xFF);
+    std::swap(lvd->clrText, lvd->clrTextBk);
   }
   if (colPair->lastFilterCount != filterId_)
   {
@@ -1098,18 +1215,17 @@ void LogContext::InsertText(const std::wstring &t)
 {
   std::map<etl::TraceEventDataItem, std::wstring> tm;
   tm[etl::TraceEventDataItem::Message] = t;
-  InsertText(tm);
+  InsertText(etl::GetCurrentLocalFileTime(), tm);
 }
 
-void LogContext::InsertText(const std::map<etl::TraceEventDataItem, std::wstring> &t)
+void LogContext::InsertText(const FILETIME &ft, const std::map<etl::TraceEventDataItem, std::wstring> &t)
 {
-  using namespace etl;
   if (!logTrace_)
   {
     return;
   }
   needRedraw_ = true;
-  logTrace_->InjectItem(GetCurrentLocalFileTime(), [&t](etl::TraceEventDataItem item)
+  logTrace_->InjectItem(ft, [&t](etl::TraceEventDataItem item)
   {
     auto it = t.find(item);
     return it != t.end() ? it->second : L"";
@@ -1142,6 +1258,20 @@ LRESULT CALLBACK ColumnContext::SubClassProc(HWND hwnd, UINT msg, WPARAM wParam,
       return 0;
     }
     break;
+  case WM_COMMAND:
+  {
+    int wmId = LOWORD(wParam);
+    switch (wmId)
+    {
+    case ID_EDIT_FINDNEXT:
+      self->owner_->GotoNextMatch();
+      break;
+    case ID_EDIT_FINDPREVIOUS:
+      self->owner_->GotoPreviousMatch();
+      break;
+    }
+  }
+  break;
   case WM_KEYUP:
   case WM_CHAR:
     switch (wParam)
@@ -1188,6 +1318,12 @@ LRESULT CALLBACK LogContext::ListViewSubClassProc(HWND hwnd, UINT msg, WPARAM wP
     {
     case ID_EDIT_COPY:
       self->CopySelected();
+      break;
+    case ID_EDIT_FINDNEXT:
+      self->GotoNextMatch();
+      break;
+    case ID_EDIT_FINDPREVIOUS:
+      self->GotoPreviousMatch();
       break;
     }
   }

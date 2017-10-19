@@ -14,7 +14,6 @@ class LogContext;
 
 struct RowContext
 {
-  bool selected;
   float colorFade;
   int lastFilterCount;
   int groupId;
@@ -74,6 +73,9 @@ public:
   void SetComPort(const std::wstring &comPort);
   bool StartCom();
   void StopCom();
+  void GotoNextMatch();
+  void GotoPreviousMatch();
+  void ReloadAllPdbs();
   //
 private:
   bool ExportFromDialog(const std::function<bool(size_t *n)> &enumerator, bool includeHeader);
@@ -89,7 +91,9 @@ private:
   std::function<bool(size_t *n)> SelectedLinesEnumerator() const;
   static LRESULT CALLBACK ListViewSubClassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
   void InsertText(const std::wstring &t);
-  void InsertText(const std::map<etl::TraceEventDataItem, std::wstring> &t);
+  void InsertText(const FILETIME &ft, const std::map<etl::TraceEventDataItem, std::wstring> &t);
+  bool FilterColumnOnlyMatch(etl::TraceEventDataItem item, const std::wstring &txt) const;
+  void GotoMatch(int dir);
 private:
   HINSTANCE programInstance_;
   WNDPROC orgListViewProc_;
@@ -101,6 +105,7 @@ private:
   etl::FormatDatabase fmtDb_;
   std::unique_ptr<etl::TraceEnumerator> logTrace_;
   etl::PdbFileManager pdbManager_;
+  std::vector<fs::path> pdbPaths_;
   std::vector<std::unique_ptr<ColumnContext>> columns_;
   std::vector<std::unique_ptr<RowContext>> rowInfo_;
   ColorFadeFilterList colorFilters_;
@@ -113,5 +118,6 @@ private:
   std::wstring comPort_;
   std::unique_ptr<std::thread> comThread_;
   bool runComThread_;
+  int currentMatchingLine_;
 };
 

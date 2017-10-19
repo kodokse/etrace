@@ -250,8 +250,11 @@ void HandleKeyDown(LogContext *context, WORD virtualKey)
   case VK_ESCAPE:
     context->ResetView();
     break;
-  case VK_F5:
+  case VK_F1:
     context->LoadPdbFromDialog();
+    break;
+  case VK_F5:
+    context->ReloadAllPdbs();
     break;
   case VK_F12:
     context->ClearTrace();
@@ -327,6 +330,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     }
   }
   break;
+  case WM_COPY:
+  {
+    auto context = reinterpret_cast<LogContext *>(GetWindowLongPtr(hWnd, GWLP_USERDATA));
+    context->CopySelected();
+  }
+  break;
   case WM_CONTEXTMENU:
   {
     auto context = reinterpret_cast<LogContext *>(GetWindowLongPtr(hWnd, GWLP_USERDATA));
@@ -385,6 +394,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         break;
       case ID_EDIT_COPY:
         context->CopySelected();
+        break;
+      case ID_EDIT_FINDNEXT:
+        context->GotoNextMatch();
+        break;
+      case ID_EDIT_FINDPREVIOUS:
+        context->GotoPreviousMatch();
         break;
       default:
         return DefWindowProc(hWnd, message, wParam, lParam);
