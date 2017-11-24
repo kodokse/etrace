@@ -64,7 +64,7 @@ bool ValidRegEx(const std::wstring &txt)
   int brackets = 0;
   for(auto ch : txt)
   {
-    if(last == L'\\' && ch >= L'0' && ch <= L'9')
+    if((bsCount & 1) == 1 && last == L'\\' && ch >= L'0' && ch <= L'9')
     {
       return false;
     }
@@ -75,7 +75,7 @@ bool ValidRegEx(const std::wstring &txt)
     else
     {
       bsCount = 0;
-      if (last != L'\\')
+      if ((bsCount & 1) == 0 ||last != L'\\')
       {
         if (ch == L'[')
         {
@@ -404,30 +404,13 @@ void LogContext::RepositionControls()
   }
 }
 
-bool LogContext::FilterColumn(etl::TraceEventDataItem item, const std::wstring &txt)
+bool LogContext::FilterColumn(etl::TraceEventDataItem item, const std::wstring &txt, bool default_result) const
 {
-  bool rv = true;
-  int column = DataItemToColumn(item);
-  if(column < 0)
-  {
-    return true;
-  }
-  auto res = columns_[column]->GetFilterText();
-  if(ValidRegEx(res))
-  {
-    std::wregex r(res, std::regex_constants::icase);
-    rv = std::regex_search(txt, r);
-  }
-  return rv;
-}
-
-bool LogContext::FilterColumnOnlyMatch(etl::TraceEventDataItem item, const std::wstring &txt) const
-{
-  bool rv = false;
+  bool rv = default_result;
   int column = DataItemToColumn(item);
   if (column < 0)
   {
-    return false;
+    return rv;
   }
   auto res = columns_[column]->GetFilterText();
   if (ValidRegEx(res))
@@ -754,8 +737,11 @@ bool LogContext::BeginTrace()
     }
     ListView_SetItemCountEx(listView_, itemCount, LVSICF_NOSCROLL | flags);
   });
-  SetWindowTextW(mainWindow_, windowTitle_.c_str());
   bool rv = logTrace_->Start();
+  if (rv)
+  {
+    SetWindowTextW(mainWindow_, windowTitle_.c_str());
+  }
   if (!comPort_.empty())
   {
     rv = StartCom();
@@ -814,7 +800,7 @@ void LogContext::GotoMatch(int dir)
     }
     for (auto eti = etl::TraceEventDataItem::TraceIndex; eti < etl::TraceEventDataItem::MAX_ITEM; ++eti)
     {
-      if (FilterColumnOnlyMatch(eti, logTrace_->GetItemValue(ri, eti)))
+      if (FilterColumn(eti, logTrace_->GetItemValue(ri, eti), false))
       {
         found = true;
         break;

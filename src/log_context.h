@@ -51,7 +51,6 @@ public:
   bool InitTraceList();
   void RecalculateRatios(NMHEADER *hdr);
   void RepositionControls();
-  bool FilterColumn(etl::TraceEventDataItem item, const std::wstring &txt);
   void ResetView();
   bool LoadPdbFromDialog();
   bool LoadEtlFromDialog();
@@ -92,7 +91,7 @@ private:
   static LRESULT CALLBACK ListViewSubClassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
   void InsertText(const std::wstring &t);
   void InsertText(const FILETIME &ft, const std::map<etl::TraceEventDataItem, std::wstring> &t);
-  bool FilterColumnOnlyMatch(etl::TraceEventDataItem item, const std::wstring &txt) const;
+  bool FilterColumn(etl::TraceEventDataItem item, const std::wstring &txt, bool default_result = true) const;
   void GotoMatch(int dir);
 private:
   HINSTANCE programInstance_;
