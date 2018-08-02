@@ -60,6 +60,7 @@ public:
   void SetMainWindow(HWND hWnd);
   bool BeginTrace();
   void EndTrace();
+  void ClearTraceUnsafe();
   void ActivateColumn(NMLISTVIEW *listViewInfo);
   void SetItemText(NMLVDISPINFOW *plvdi);
   void SetItemColors(NMLVCUSTOMDRAW *lvd);
@@ -68,8 +69,8 @@ public:
   int ColumnCount() const;
   bool IsFilterMessage(int controlId) const;
   void UpdateFilterText(int controlId);
-  void ClearTrace();
   void SetComPort(const std::wstring &comPort);
+  void SetBaudRate(int baudRate);
   bool StartCom();
   void StopCom();
   void GotoNextMatch();
@@ -115,6 +116,7 @@ private:
   std::mutex rowInfoLock_;
   int groupCounter_;
   std::wstring comPort_;
+  int baudRate_;
   std::unique_ptr<std::thread> comThread_;
   bool runComThread_;
   int currentMatchingLine_;

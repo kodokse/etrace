@@ -163,6 +163,7 @@ LogContext::LogContext(HINSTANCE programInstance)
   , filterId_(0)
   , groupCounter_(0)
   , currentMatchingLine_(std::numeric_limits<size_t>::max())
+  , baudRate_(921600)
 {
 }
 
@@ -754,6 +755,11 @@ void LogContext::SetComPort(const std::wstring &comPort)
   comPort_ = comPort;
 }
 
+void LogContext::SetBaudRate(int baudRate)
+{
+  baudRate_ = baudRate;
+}
+
 void LogContext::StopCom()
 {
   runComThread_ = false;
@@ -843,6 +849,7 @@ bool LogContext::StartCom()
     std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> converter;
     ComState state = ComState::Connecting;
     HANDLE h = INVALID_HANDLE_VALUE;
+    std::wstring keepString;
     while (runComThread_)
     {
       if (state == ComState::Connecting)
@@ -855,9 +862,14 @@ bool LogContext::StartCom()
         if (h != INVALID_HANDLE_VALUE)
         {
           DCB dcb = { 0 };
+          dcb.DCBlength = sizeof(DCB);
           if (GetCommState(h, &dcb))
           {
-            dcb.BaudRate = CBR_19200;
+            dcb.BaudRate = baudRate_;
+            dcb.ByteSize = 8;
+            dcb.Parity = 0;
+            dcb.StopBits = 0;
+            dcb.fBinary = 1;
             if (SetCommState(h, &dcb))
             {
               state = ComState::RequestData;
@@ -907,8 +919,22 @@ bool LogContext::StartCom()
       }
       if(state == ComState::ConsumeData)
       {
-        std::wstring str = converter.from_bytes(tmp, tmp + bytesRead);
+        for (DWORD i = 0; i < bytesRead; ++i)
+        {
+          if ((tmp[i] & 0x80) != 0)
+          {
+            tmp[i] = '?';
+          }
+        }
+        std::wstring str = keepString;
+        str += converter.from_bytes(tmp, tmp + bytesRead);
+        keepString.clear();
         auto sv = etl::Split(str, L'\n');
+        if (str.length() > 0 && str.back() != L'\n')
+        {
+          keepString = sv.back();
+          sv.pop_back();
+        }
         auto timeStamp = etl::GetCurrentLocalFileTime();
         std::map<etl::TraceEventDataItem, std::wstring> txtMap{ {etl::TraceEventDataItem::ModuleName, comPort_.substr(4)} };
         for (auto &&s : sv)
@@ -1186,7 +1212,7 @@ void LogContext::UpdateFilterText(int controlId)
   }
 }
 
-void LogContext::ClearTrace()
+void LogContext::ClearTraceUnsafe()
 {
   logTrace_->RemoveAllItems();
   for (auto &c : columns_)

@@ -137,6 +137,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
   CommandLineMap cmdLineMap;
   cmdLineMap[L"pdb"];
   auto &comVec = cmdLineMap[L"com"];
+  auto &baudVec = cmdLineMap[L"baud"];
   auto &sessionNameVec = cmdLineMap[L"live"];
   auto &logVec = cmdLineMap[L"log"];
   ParseCommandLine(lpCmdLine, cmdLineMap);
@@ -153,6 +154,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     {
       context.SetComPort(L"\\\\.\\COM" + portNum);
     }
+  }
+  if (!baudVec.empty())
+  {
+    context.SetBaudRate(std::stoi(baudVec[0]));
   }
   if(!sessionNameVec.empty())
   {
@@ -256,9 +261,9 @@ void HandleKeyDown(LogContext *context, WORD virtualKey)
   case VK_F5:
     context->ReloadAllPdbs();
     break;
-  case VK_F12:
-    context->ClearTrace();
-    break;
+  //case VK_F12:
+  //  context->ClearTrace();
+  //  break;
   }
 }
 
@@ -378,6 +383,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         break;
       case ID_FILE_NEW:
         context->EndTrace();
+        context->ClearTraceUnsafe();
+        context->LoadPdbFromDialog();
         if(context->InitializeLiveSession(etl::NewGuidAsString()))
         {
           context->BeginTrace();
@@ -400,6 +407,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         break;
       case ID_EDIT_FINDPREVIOUS:
         context->GotoPreviousMatch();
+        break;
+      case ID_EDIT_CLEAR:
+        context->EndTrace();
+        context->ClearTraceUnsafe();
+        context->BeginTrace();
         break;
       default:
         return DefWindowProc(hWnd, message, wParam, lParam);
